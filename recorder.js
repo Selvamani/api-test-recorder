@@ -38,6 +38,12 @@ document.getElementById("noteInput").addEventListener("keydown", e => { if (e.ke
 document.querySelectorAll(".ftab").forEach(tab => {
   tab.addEventListener("click", () => setFilter(tab.dataset.filter, tab));
 });
+// One delegated click listener for the whole timeline — avoids re-attaching a
+// listener per entry on every render (which froze the page under WS floods).
+document.getElementById("timeline").addEventListener("click", (ev) => {
+  const el = ev.target.closest(".entry");
+  if (el && el.dataset.id) openDetail(el.dataset.id);
+});
 
 /* ── Background messages ─────────────────────────────────────── */
 chrome.runtime.onMessage.addListener((msg) => {
@@ -49,6 +55,9 @@ chrome.runtime.onMessage.addListener((msg) => {
       (msg.error ? " (" + msg.error + ")" : "") +
       ". If Chrome DevTools is open on that tab, close it — Chrome only allows one debugger per tab — then Stop and Start again.");
   }
+  // Start/Stop driven from the toolbar popup.
+  if (msg.type === "POPUP_START" && !isRecording) startRecording();
+  if (msg.type === "POPUP_STOP"  &&  isRecording) stopRecording();
 });
 
 /* ── Recording ───────────────────────────────────────────────── */
@@ -141,7 +150,54 @@ function showError(msg) {
 }
 
 /* ── Entries ─────────────────────────────────────────────────── */
-function pushEntry(e) { entries.push(e); updateStats(); renderTimeline(); autoScroll(); }
+const MAX_DOM_ROWS = 4000;   // cap live DOM nodes; full data is kept in `entries` for export
+let renderedIndex  = 0;      // how many of `entries` have been flushed to the DOM
+let flushScheduled = false;
+const stat = { http:0, s2xx:0, s4xx:0, s5xx:0, ws:0, notes:0, console:0, msSum:0, msCount:0 };
+
+function pushEntry(e) {
+  entries.push(e);
+  tallyStat(e);
+  scheduleFlush();
+}
+
+// Coalesce bursts (e.g. WS floods) into one DOM update per animation frame.
+function scheduleFlush() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  requestAnimationFrame(flushEntries);
+}
+
+function flushEntries() {
+  flushScheduled = false;
+  const tl = document.getElementById("timeline");
+  let html = "";
+  for (; renderedIndex < entries.length; renderedIndex++) {
+    const e = entries[renderedIndex];
+    if (matchesFilter(e)) html += entryHTML(e);
+  }
+  if (html) {
+    const em = tl.querySelector(".empty-msg");
+    if (em) em.remove();
+    tl.insertAdjacentHTML("beforeend", html);
+    while (tl.childElementCount > MAX_DOM_ROWS) tl.removeChild(tl.firstElementChild);
+  }
+  updateStats();
+  autoScroll();
+}
+
+function tallyStat(e) {
+  if (e.kind === "http") {
+    stat.http++;
+    if (e.status >= 200 && e.status < 300) stat.s2xx++;
+    else if (e.status >= 400 && e.status < 500) stat.s4xx++;
+    else if (e.status >= 500) stat.s5xx++;
+    if (e.ms) { stat.msSum += e.ms; stat.msCount++; }
+  } else if (e.kind === "ws") {
+    if (e.event === "sent" || e.event === "received") stat.ws++;
+  } else if (e.kind === "note") stat.notes++;
+  else if (e.kind === "console") stat.console++;
+}
 
 function addNote() {
   const v = document.getElementById("noteInput").value.trim();
@@ -159,50 +215,65 @@ function setFilter(f, el) {
 
 function clearAll() {
   if (entries.length && !confirm("Clear all entries?")) return;
-  entries = []; selectedId = null;
+  entries = []; selectedId = null; renderedIndex = 0;
+  Object.keys(stat).forEach(k => stat[k] = 0);
   updateStats(); renderTimeline();
   document.getElementById("detailTitle").textContent = "Select an entry to inspect";
   document.getElementById("detailBody").innerHTML = "<div style='padding:3rem;text-align:center;color:#333;font-size:12px'>Click any entry in the timeline</div>";
   document.getElementById("copyBtn").style.display = "none";
 }
 
-function autoScroll() { const t = document.getElementById("timeline"); t.scrollTop = t.scrollHeight; }
+// Only stick to the bottom if the user is already near it — don't yank them
+// back down while they're scrolled up reading an earlier entry.
+function autoScroll() {
+  const t = document.getElementById("timeline");
+  if (t.scrollHeight - t.scrollTop - t.clientHeight < 80) t.scrollTop = t.scrollHeight;
+}
 
 /* ── Stats ───────────────────────────────────────────────────── */
+// Reads O(1) running counters maintained by tallyStat (no full-array scans).
 function updateStats() {
-  const apis  = entries.filter(e => e.kind === "http");
-  const wsMsgs = entries.filter(e => e.kind === "ws" && (e.event === "sent" || e.event === "received"));
-  document.getElementById("sTotal").textContent = apis.length;
-  document.getElementById("s2xx").textContent   = apis.filter(e => e.status >= 200 && e.status < 300).length;
-  document.getElementById("s4xx").textContent   = apis.filter(e => e.status >= 400 && e.status < 500).length;
-  document.getElementById("s5xx").textContent   = apis.filter(e => e.status >= 500).length;
-  document.getElementById("sNotes").textContent = entries.filter(e => e.kind === "note").length + wsMsgs.length;
-  const consoleLogs = entries.filter(e => e.kind === "console");
+  document.getElementById("sTotal").textContent = stat.http;
+  document.getElementById("s2xx").textContent   = stat.s2xx;
+  document.getElementById("s4xx").textContent   = stat.s4xx;
+  document.getElementById("s5xx").textContent   = stat.s5xx;
+  document.getElementById("sNotes").textContent = stat.notes + stat.ws;
   const consoleEl = document.getElementById("sConsole");
-  if (consoleEl) consoleEl.textContent = consoleLogs.length;
-  const ms = apis.map(e => e.ms).filter(Boolean);
-  document.getElementById("sAvg").textContent   = ms.length
-    ? Math.round(ms.reduce((a,b) => a+b, 0) / ms.length) + "ms" : "—";
+  if (consoleEl) consoleEl.textContent = stat.console;
+  document.getElementById("sAvg").textContent = stat.msCount
+    ? Math.round(stat.msSum / stat.msCount) + "ms" : "—";
 }
 
 /* ── Timeline ────────────────────────────────────────────────── */
+function matchesFilter(e) {
+  if (filter === "err")  return (e.kind === "http" && e.status >= 400) || (e.kind === "ws" && e.event === "error");
+  if (filter === "note") return e.kind === "note";
+  if (filter === "ws")   return e.kind === "ws";
+  if (filter === "console") return e.kind === "console";
+  return true;
+}
+
+// Full rebuild — used on filter change / clear / init. Per-entry appends during
+// recording go through flushEntries() instead. Caps the DOM to the most recent
+// MAX_DOM_ROWS matching entries (full data is still kept in `entries`).
 function renderTimeline() {
   const tl  = document.getElementById("timeline");
-  const vis = entries.filter(e => {
-    if (filter === "err")  return (e.kind === "http" && e.status >= 400) || (e.kind === "ws" && e.event === "error");
-    if (filter === "note") return e.kind === "note";
-    if (filter === "ws")   return e.kind === "ws";
-    if (filter === "console") return e.kind === "console";
-    return true;
-  });
+  const vis = entries.filter(matchesFilter);
 
   if (!vis.length) {
     tl.innerHTML = "<div class='empty-msg'>" + (entries.length === 0
       ? "Start recording to capture API calls" : "No entries match filter") + "</div>";
+    renderedIndex = entries.length;
     return;
   }
 
-  tl.innerHTML = vis.map(e => {
+  const shown = vis.length > MAX_DOM_ROWS ? vis.slice(-MAX_DOM_ROWS) : vis;
+  tl.innerHTML = shown.map(entryHTML).join("");
+  renderedIndex = entries.length;
+}
+
+// Builds the HTML for one timeline entry (shared by renderTimeline + flushEntries).
+function entryHTML(e) {
     const sel = e.id === selectedId ? " sel" : "";
 
     if (e.kind === "note") {
@@ -265,17 +336,19 @@ function renderTimeline() {
       "<span style='font-size:10px;color:#444'>" + e.ms + "ms</span>" +
       "<span class='ets'>" + fmtTime(e.ts) + "</span></div>" +
       "<div class='eurl'>" + esc(shortPath(e.url)) + "</div></div>";
-  }).join("");
-
-  tl.querySelectorAll(".entry").forEach(el => {
-    el.addEventListener("click", () => openDetail(el.dataset.id));
-  });
 }
 
 /* ── Detail ──────────────────────────────────────────────────── */
 function openDetail(id) {
+  // Move the highlight by toggling a class — not a full re-render (which under
+  // WS floods made every click rebuild thousands of DOM nodes).
+  const tl = document.getElementById("timeline");
+  const prev = tl.querySelector(".entry.sel");
+  if (prev) prev.classList.remove("sel");
   selectedId = id;
-  renderTimeline();
+  const cur = tl.querySelector(".entry[data-id='" + id + "']");
+  if (cur) cur.classList.add("sel");
+
   const e = entries.find(x => x.id === id);
   if (!e) return;
 
@@ -301,11 +374,14 @@ function openDetail(id) {
       "<span class='badge' style='background:#1a1a1a;color:#555'>" + e.event.toUpperCase() + "</span>" +
       (e.idx !== undefined ? "<span style='font-size:10px;color:#444'>msg #" + e.idx + "</span>" : "") +
       "<span style='font-size:10px;color:#444'>" + new Date(e.ts).toISOString() + "</span></div>" +
-      "<div class='fb'><div class='fl'>payload</div><pre>" + esc(fmt(e.payload)) + "</pre></div>" +
+      "<div class='fb'><div class='fl' style='display:flex;align-items:center;gap:8px'>payload" +
+        "<button id='b64Btn' style='font-size:9px;font-weight:600;color:#9bdcc4;background:#0A1F14;border:1px solid #1D5C42;border-radius:3px;padding:1px 6px;cursor:pointer'>Decode base64</button>" +
+      "</div><pre id='wsPayload'>" + esc(fmt(e.payload)) + "</pre></div>" +
       "<div class='fb'><div class='fl'>annotation</div><input class='ann-input' id='annInput' value='" + esc(e.note||"") + "' placeholder='Add a note…'></div>";
     document.getElementById("annInput").addEventListener("input", function() {
       const en = entries.find(x => x.id === id); if (en) en.note = this.value;
     });
+    wireBase64Toggle(e.payload);
     return;
   }
 
@@ -491,6 +567,7 @@ pre{font-size:10px;font-family:monospace;background:#111;border:1px solid #1e1e1
   <span style="font-size:11px;color:#555;margin-left:auto;margin-right:6px">${httpEntries.length} HTTP · ${wsEntries.length} WS · ${consoleEntries.length} logs · ${noteEntries.length} notes · ${duration}s</span>
   <button class="dlbtn" onclick="downloadConsoleLogs()" title="Download console logs only as JSON">↓ Console logs</button>
   <button class="dlbtn" onclick="downloadNetworkJSON()" title="Download network requests/responses only as JSON">↓ Network JSON</button>
+  <button class="dlbtn" onclick="downloadWebSocket()" title="Download WebSocket messages only as JSON (with base64-decoded payloads)">↓ WebSocket JSON</button>
 </div>
 
 <div class="stats">
@@ -629,6 +706,9 @@ function esc(s){return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").
 function fmt(v){if(v==null)return"(empty)";try{return JSON.stringify(typeof v==="string"?JSON.parse(v):v,null,2);}catch(_){return String(v);}}
 function fmtTime(ts){const d=new Date(ts);return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0");}
 
+function b64ToText(str){var s=String(str).trim().replace(/\\s+/g,"");if(!s||!/^[A-Za-z0-9+/]+={0,2}$/.test(s))throw new Error("not base64");var bin=atob(s);var bytes=Uint8Array.from(bin,function(c){return c.charCodeAt(0);});return new TextDecoder().decode(bytes);}
+function wireWsB64(payload){var btn=document.getElementById("wsB64Btn"),pre=document.getElementById("wsPayload");if(!btn||!pre)return;var rawStr=typeof payload==="string"?payload:JSON.stringify(payload),decoded=false;btn.addEventListener("click",function(){decoded=!decoded;if(decoded){try{pre.textContent=fmt(b64ToText(rawStr));}catch(_){pre.textContent="(payload is not valid base64)";}btn.textContent="Show raw";}else{pre.textContent=fmt(payload);btn.textContent="Decode base64";}});}
+
 /* ── Main tabs ───────────────────────────────────────────────── */
 document.querySelectorAll(".main-tab").forEach(t => {
   t.addEventListener("click", () => {
@@ -670,18 +750,25 @@ function renderTimeline() {
     const isErr=e.status>=400;const[bg,fg]=METHOD_COLORS[e.method]||["#1a1a1a","#888"];let su="";try{const u=new URL(e.url);su=u.pathname+(u.search||"");}catch(_){su=e.url;}su=su.length>35?"…"+su.slice(-32):su;
     return"<div class='entry"+(isErr?" err":"")+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:"+bg+";color:"+fg+"'>"+e.method+"</span><span class='badge' style='background:"+(isErr?"#2A0A0A":"#0A1F14")+";color:"+(isErr?"#F09595":"#5DCAA5")+"'>"+e.status+"</span><span style='font-size:9px;color:#444'>"+e.ms+"ms</span><span class='ets'>"+fmtTime(e.ts)+"</span></div><div class='eurl'>"+esc(su)+"</div></div>";
   }).join("");
-  tl.querySelectorAll(".entry").forEach(el=>el.addEventListener("click",()=>openDetail(el.dataset.id)));
+  // One delegated listener (set once) instead of one per entry — keeps clicks
+  // instant even with thousands of WS frames.
+  tl.onclick=function(ev){var el=ev.target.closest(".entry");if(el&&el.dataset.id)openDetail(el.dataset.id);};
 }
 
 function openDetail(id) {
-  selectedId=id; renderTimeline();
+  // Move highlight via class toggle — NOT a full renderTimeline() rebuild
+  // (which re-rendered every entry on each click and made WS-heavy reports lag).
+  var _tl=document.getElementById("timeline");
+  var _prev=_tl.querySelector(".entry.sel"); if(_prev)_prev.classList.remove("sel");
+  selectedId=id;
+  var _cur=_tl.querySelector(".entry[data-id='"+id+"']"); if(_cur)_cur.classList.add("sel");
   const e=ALL_ENTRIES.find(x=>x.id===id); if(!e)return;
   const titleEl=document.getElementById("detailTitle");
   const body=document.getElementById("detailBody");
   if(START_TS&&e.ts){const vid=document.getElementById("vid");if(vid){let t=(e.ts-START_TS)/1000-0.5;if(!isFinite(t))t=0;t=Math.max(0,t);if(isFinite(vid.duration)&&vid.duration>0)t=Math.min(t,vid.duration);vid.currentTime=t;}}
   if(e.kind==="note"){titleEl.textContent="Note";body.innerHTML="<div class='fb'><div class='fl'>annotation</div><div style='font-size:14px;color:#fff;line-height:1.5'>"+esc(e.text)+"</div></div><div class='fb'><div class='fl'>timestamp</div><div style='font-size:11px;color:#555;font-family:monospace'>"+new Date(e.ts).toISOString()+"</div></div>";return;}
   if(e.kind==="console"){const cs=CON_STYLE[e.level]||CON_STYLE.log;titleEl.textContent=cs.label+" · "+(e.level||"log").toUpperCase();body.innerHTML="<div class='fb'><div class='fl'>message</div><pre style='color:"+cs.fg+"'>"+esc(e.text||"")+"</pre></div>"+(e.url?"<div class='fb'><div class='fl'>source</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace'>"+esc(e.url)+(e.lineNumber?":"+e.lineNumber:"")+"</div></div>":"")+"<div class='fb'><div class='fl'>timestamp</div><div style='font-size:11px;color:#555;font-family:monospace'>"+new Date(e.ts).toISOString()+"</div></div>";return;}
-  if(e.kind==="ws"){const s=WS_STYLE[e.event]||WS_STYLE.received;titleEl.textContent=s.label+" "+e.event.toUpperCase()+(e.idx!==undefined?" #"+e.idx:"");body.innerHTML="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all'>"+esc(e.url)+"</div></div><div style='display:flex;gap:6px;margin-bottom:12px;align-items:center'><span class='badge' style='background:"+s.bg+";color:"+s.fg+"'>"+s.label+"</span><span class='badge' style='background:#1a1a1a;color:#555'>"+e.event.toUpperCase()+"</span>"+(e.idx!==undefined?"<span style='font-size:10px;color:#444'>msg #"+e.idx+"</span>":"")+"<span style='font-size:10px;color:#444'>"+new Date(e.ts).toISOString()+"</span></div><div class='fb'><div class='fl'>payload</div><pre>"+esc(fmt(e.payload))+"</pre></div>"+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");return;}
+  if(e.kind==="ws"){const s=WS_STYLE[e.event]||WS_STYLE.received;titleEl.textContent=s.label+" "+e.event.toUpperCase()+(e.idx!==undefined?" #"+e.idx:"");body.innerHTML="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all'>"+esc(e.url)+"</div></div><div style='display:flex;gap:6px;margin-bottom:12px;align-items:center'><span class='badge' style='background:"+s.bg+";color:"+s.fg+"'>"+s.label+"</span><span class='badge' style='background:#1a1a1a;color:#555'>"+e.event.toUpperCase()+"</span>"+(e.idx!==undefined?"<span style='font-size:10px;color:#444'>msg #"+e.idx+"</span>":"")+"<span style='font-size:10px;color:#444'>"+new Date(e.ts).toISOString()+"</span></div><div class='fb'><div class='fl' style='display:flex;align-items:center;gap:8px'>payload<button id='wsB64Btn' style='font-size:9px;font-weight:600;color:#9bdcc4;background:#0A1F14;border:1px solid #1D5C42;border-radius:3px;padding:1px 6px;cursor:pointer'>Decode base64</button></div><pre id='wsPayload'>"+esc(fmt(e.payload))+"</pre></div>"+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");wireWsB64(e.payload);return;}
   const[bg,fg]=METHOD_COLORS[e.method]||["#1a1a1a","#888"];
   titleEl.textContent=e.method+" "+e.status+" · "+e.ms+"ms";
   body.innerHTML="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all;line-height:1.5'>"+esc(e.url)+"</div></div>"+"<div style='display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;align-items:center'><span class='badge' style='background:"+bg+";color:"+fg+"'>"+e.method+"</span><span class='badge' style='background:"+(e.status>=400?"#2A0A0A":"#0A1F14")+";color:"+(e.status>=400?"#F09595":"#5DCAA5")+"'>"+e.status+"</span><span style='font-size:10px;color:#444'>"+new Date(e.ts).toISOString()+"</span></div>"+(e.reqBody!=null?"<div class='fb'><div class='fl'>request body</div><pre>"+esc(fmt(e.reqBody))+"</pre></div>":"")+"<div class='fb'><div class='fl'>response body</div><pre>"+esc(fmt(e.resBody))+"</pre></div>"+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");
@@ -835,6 +922,16 @@ function downloadNetworkJSON(){
   if(!net.length){alert("No network requests in this session.");return;}
   _dlJSON("network-"+Date.now()+".json", net);
 }
+function downloadWebSocket(){
+  const ws=ALL_ENTRIES.filter(e=>e.kind==="ws").map(e=>{
+    const raw=typeof e.payload==="string"?e.payload:JSON.stringify(e.payload);
+    let decoded; try{decoded=b64ToText(raw);}catch(_){decoded=undefined;}
+    return { event:e.event, url:e.url, idx:e.idx, ts:e.ts, time:new Date(e.ts).toISOString(),
+             payload:e.payload, payloadDecoded:decoded, note:e.note||undefined };
+  });
+  if(!ws.length){alert("No WebSocket messages in this session.");return;}
+  _dlJSON("websocket-"+Date.now()+".json", ws);
+}
 
 renderTimeline();
 </script>
@@ -875,6 +972,39 @@ function fmt(v) {
 function shortPath(url) {
   try { const u = new URL(url); return u.pathname + (u.search||""); }
   catch (_) { return url.length > 55 ? "…" + url.slice(-52) : url; }
+}
+
+// Decode a base64 string to UTF-8 text. Throws if not valid base64.
+function b64ToText(str) {
+  const s = String(str).trim().replace(/\s+/g, "");
+  if (!s || !/^[A-Za-z0-9+/]+={0,2}$/.test(s)) throw new Error("not base64");
+  const bin = atob(s);
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+// Wires the WS-payload "Decode base64" button to toggle raw ⇄ decoded.
+function wireBase64Toggle(payload) {
+  const btn = document.getElementById("b64Btn");
+  const pre = document.getElementById("wsPayload");
+  if (!btn || !pre) return;
+  const rawStr = typeof payload === "string" ? payload : JSON.stringify(payload);
+  let decoded = false;
+  btn.addEventListener("click", () => {
+    decoded = !decoded;
+    if (decoded) {
+      try {
+        pre.textContent = fmt(b64ToText(rawStr));   // fmt pretty-prints if decoded text is JSON
+        btn.textContent = "Show raw";
+      } catch (_) {
+        pre.textContent = "(payload is not valid base64)";
+        btn.textContent = "Show raw";
+      }
+    } else {
+      pre.textContent = fmt(payload);
+      btn.textContent = "Decode base64";
+    }
+  });
 }
 
 function downloadBlob(blob, name) {
