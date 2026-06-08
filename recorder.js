@@ -694,7 +694,7 @@ function renderNetwork() {
       "<td style='color:"+sc+";font-weight:600;font-family:monospace'>"+e.status+"</td>"+
       "<td style='color:"+mfg+";font-weight:700;font-family:monospace;font-size:10px'>"+esc(e.method)+"</td>"+
       "<td title='"+esc(e.url)+"' style='color:#aaa'>"+esc(displayUrl)+"</td>"+
-      "<td style='color:"+(e.ms>500?"#EF9F27":e.ms>200?"#aaa":"#666");+"font-family:monospace'>"+e.ms+"ms</td>"+
+      "<td style='color:"+(e.ms>500?"#EF9F27":e.ms>200?"#aaa":"#666")+";font-family:monospace'>"+e.ms+"ms</td>"+
       "<td><div style='position:relative;height:10px;width:100%;background:#1a1a1a;border-radius:2px;overflow:hidden'>"+
         "<div class='timing-bar' style='position:absolute;left:"+startPct+"%;width:"+widthPct+"%;background:"+barColor+";height:100%'></div>"+
       "</div></td>"+
