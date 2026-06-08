@@ -67,7 +67,59 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "RECORDING_STARTED") { badge.style.display = "flex"; }
     if (msg.type === "RECORDING_STOPPED") { badge.style.display = "none"; }
-    if (msg.type === "API_EVENT") { showToast(msg.data); }
+    if (msg.type === "API_EVENT") {
+      const d = msg.data;
+      if (d.kind === "ws") {
+        // only toast sent/received messages, not connect/close noise
+        if (d.event === "sent" || d.event === "received" || d.event === "error") {
+          showWsToast(d);
+        }
+      } else {
+        showToast(d);
+      }
+    }
   });
+
+  function showWsToast({ event, url, payload }) {
+    const isErr = event === "error";
+    const colors = { sent: ["#0D1F35","#378ADD"], received: ["#1C1530","#7F77DD"], error: ["#2A0A0A","#E24B4A"] };
+    const [bg, fg] = colors[event] || colors.received;
+    const label = { sent: "WS ↑", received: "WS ↓", error: "WS !" }[event] || "WS";
+
+    let shortUrl;
+    try { const u = new URL(url); shortUrl = u.host + u.pathname; } catch (_) { shortUrl = url; }
+
+    let preview = "";
+    if (payload !== null && payload !== undefined) {
+      const p = typeof payload === "string" ? payload : JSON.stringify(payload);
+      preview = p.length > 55 ? p.slice(0, 52) + "…" : p;
+    }
+
+    const t = document.createElement("div");
+    t.style.cssText = "background:rgba(10,10,10,0.92);color:#f0f0f0;border-radius:8px;padding:8px 12px;border-left:3px solid " + fg + ";opacity:0;transform:translateX(14px);transition:opacity .15s,transform .15s";
+
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:3px";
+
+    const mb = document.createElement("span");
+    mb.style.cssText = "background:" + bg + ";color:" + fg + ";font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px";
+    mb.textContent = label;
+
+    const urlEl = document.createElement("span");
+    urlEl.style.cssText = "font-size:10px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px";
+    urlEl.textContent = shortUrl;
+
+    row.append(mb, urlEl);
+
+    const payloadDiv = document.createElement("div");
+    payloadDiv.style.cssText = "font-size:10px;color:#666;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    payloadDiv.textContent = preview;
+
+    t.append(row);
+    if (preview) t.append(payloadDiv);
+    overlay.appendChild(t);
+    requestAnimationFrame(() => { t.style.opacity = "1"; t.style.transform = "translateX(0)"; });
+    setTimeout(() => { t.style.opacity = "0"; setTimeout(() => t.remove(), 200); }, 3500);
+  }
 
 })();

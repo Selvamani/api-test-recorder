@@ -39,7 +39,7 @@
   button.danger { background: #A32D2D; color: #fff; border-color: #A32D2D; }
   button.danger:hover:not(:disabled) { background: #791F1F; }
   .stats {
-    display: flex; gap: 0; flex-shrink: 0;
+    display: flex; gap: 0; flex-shrink: 0; flex-wrap: wrap;
     border-bottom: 1px solid #1e1e1e; background: #0e0e0e;
   }
   .stat { padding: 7px 16px; border-right: 1px solid #1a1a1a; }
@@ -131,7 +131,8 @@
   <div class="stat"><div class="stat-n" id="s4xx" style="color:#E24B4A">0</div><div class="stat-l">4xx err</div></div>
   <div class="stat"><div class="stat-n" id="s5xx" style="color:#E24B4A">0</div><div class="stat-l">5xx err</div></div>
   <div class="stat"><div class="stat-n" id="sAvg" style="color:#7F77DD">—</div><div class="stat-l">avg ms</div></div>
-  <div class="stat"><div class="stat-n" id="sNotes">0</div><div class="stat-l">notes</div></div>
+  <div class="stat"><div class="stat-n" id="sNotes">0</div><div class="stat-l">notes/ws</div></div>
+  <div class="stat"><div class="stat-n" id="sConsole">0</div><div class="stat-l">console</div></div>
 </div>
 
 <div class="note-bar">
@@ -147,6 +148,8 @@
         <span class="ftab active" data-filter="all">All</span>
         <span class="ftab" data-filter="err">Errors</span>
         <span class="ftab" data-filter="note">Notes</span>
+        <span class="ftab" data-filter="ws">WS</span>
+        <span class="ftab" data-filter="console">Console</span>
       </div>
     </div>
     <div class="timeline-list" id="timeline">
