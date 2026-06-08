@@ -13,7 +13,8 @@ A Chrome extension that **screen-records your browser tab** and captures every A
 - 🟢 **Live toast overlays** on the target page showing each call as it fires
 - 📝 **Step annotations** — add timestamped notes mid-session to mark test steps
 - 🔍 **Per-call detail** — inspect full request body, response body, status, duration
-- 📊 **Export** — JSON session log or standalone HTML report
+- 🔌 **WebSocket & console capture** — WS frames and page `console` logs land in the same timeline
+- 📊 **Export** — JSON session log, or a **self-contained interactive HTML report** (timeline + DevTools-style network panel, with the screen recording embedded inline)
 - ⚡ **Zero config** — no proxy, no server, no page changes needed
 
 ---
@@ -69,7 +70,10 @@ Click any entry to inspect the full request/response body in the right panel. Ad
 ### Exports
 
 - **JSON** — full session log with all entries, request bodies, response bodies, timestamps
-- **HTML report** — shareable standalone file with summary stats and annotated table
+- **HTML report** — a single self-contained `.html` file you can open in any browser, e‑mail, or attach to a ticket. No server or internet needed — everything (including the screen recording) is embedded inline. It opens as an interactive viewer with:
+  - **Timeline tab** — filterable entry list (All / HTTP / Err / WS / Log / Notes) beside the embedded recording; clicking an entry **seeks the video** to that moment and shows full request/response detail
+  - **Network tab** — a DevTools-style table with status, method, URL, duration and a request **waterfall**, plus URL search, quick filters (Fetch/XHR, 2xx, 4xx, 5xx, Slow >500ms), sortable columns, and per-request Response / Request / Headers / Timing panels
+  - **Summary stats** — HTTP / 2xx / 4xx / 5xx / WS / warnings / errors / notes counts at a glance
 
 ---
 
@@ -152,29 +156,6 @@ api-test-recorder/
 - Recording does not capture cross-origin iframes' network calls (CDP limitation).
 - Very large response bodies (>5MB) may be truncated in the timeline view.
 - The `.webm` file contains the recorder tab UI, not just the target page. Use the side-by-side layout for best results.
-
----
-
-## Development
-
-No build step required — plain HTML/CSS/JS.
-
-```bash
-# Clone
-git clone https://github.com/YOUR_USERNAME/api-test-recorder.git
-
-# Load in Chrome
-# chrome://extensions → Developer mode → Load unpacked → select folder
-
-# After any change to background.js or manifest.json:
-# chrome://extensions → click ↺ reload on the extension
-
-# After changes to content.js / injected.js:
-# Reload the target page (Ctrl+Shift+R)
-
-# After changes to recorder.html / recorder.js:
-# Close and reopen the recorder tab
-```
 
 ---
 
