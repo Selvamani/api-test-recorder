@@ -8,6 +8,7 @@ let mediaRecorder  = null;
 let recordedChunks = [];
 let captureStream  = null;
 let finalVideoBlob = null;  // stored after stop for HTML export
+let recordedMime   = "video/webm";  // actual MediaRecorder mime (mp4 when supported)
 
 const METHOD_COLORS = {
   GET:    ["#0D1F35","#378ADD"],
@@ -43,6 +44,11 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "API_EVENT" && isRecording) {
     pushEntry({ ...msg.data, kind: msg.data.kind || "http", id: uid(), note: "" });
   }
+  if (msg.type === "ATTACH_ERROR") {
+    showError("Could not attach the recorder to the target tab" +
+      (msg.error ? " (" + msg.error + ")" : "") +
+      ". If Chrome DevTools is open on that tab, close it — Chrome only allows one debugger per tab — then Stop and Start again.");
+  }
 });
 
 /* ── Recording ───────────────────────────────────────────────── */
@@ -68,8 +74,16 @@ async function startRecording() {
     }
 
     recordedChunks = [];
-    const mimeType = ["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm"]
-      .find(t => MediaRecorder.isTypeSupported(t)) || "video/webm";
+    // Prefer MP4 (H.264+AAC) — plays everywhere; Chrome 130+ can mux it.
+    // Fall back to WebM on older Chrome / unsupported codecs.
+    const mimeType = [
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4",
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm"
+    ].find(t => MediaRecorder.isTypeSupported(t)) || "video/webm";
+    recordedMime = mimeType;
 
     mediaRecorder = new MediaRecorder(captureStream, { mimeType });
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
@@ -93,8 +107,13 @@ function stopRecording() {
 
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.onstop = async () => {
-      finalVideoBlob = await makeSeekableWebM(recordedChunks);
-      downloadBlob(finalVideoBlob, "screen-recording-" + Date.now() + ".webm");
+      const isMp4 = recordedMime.startsWith("video/mp4");
+      // Use a clean container mime (no codecs) — a comma in "codecs=avc1,mp4a"
+      // would break the data: URI used when embedding the video in the report.
+      finalVideoBlob = isMp4
+        ? new Blob(recordedChunks, { type: "video/mp4" })
+        : await makeSeekableWebM(recordedChunks);   // WebM gets duration/cues injected
+      downloadBlob(finalVideoBlob, "screen-recording-" + Date.now() + (isMp4 ? ".mp4" : ".webm"));
     };
     mediaRecorder.stop();
   }
@@ -368,7 +387,11 @@ async function _doExportHTML() {
   try {
     const blob = finalVideoBlob
       ? finalVideoBlob
-      : (recordedChunks.length > 0 ? await makeSeekableWebM(recordedChunks) : null);
+      : (recordedChunks.length > 0
+          ? (recordedMime.startsWith("video/mp4")
+              ? new Blob(recordedChunks, { type: "video/mp4" })
+              : await makeSeekableWebM(recordedChunks))
+          : null);
     if (blob) videoSrc = await blobToBase64(blob);
   } catch (_) {}
 
@@ -395,6 +418,8 @@ async function _doExportHTML() {
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0c0c0c;color:#e0e0e0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
 .topbar{background:#111;border-bottom:1px solid #1e1e1e;padding:8px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap}
 .logo{font-size:13px;font-weight:700;color:#fff}.logo span{color:#1D9E75}
+.dlbtn{font-size:10px;font-weight:600;color:#9bdcc4;background:#0A1F14;border:1px solid #1D5C42;border-radius:4px;padding:3px 9px;cursor:pointer;white-space:nowrap}
+.dlbtn:hover{background:#0e2a1d;color:#c6f0e0}
 .tabs-bar{display:flex;gap:0;background:#0e0e0e;border-bottom:1px solid #1e1e1e;flex-shrink:0}
 .main-tab{padding:8px 18px;font-size:11px;font-weight:600;color:#555;cursor:pointer;border-bottom:2px solid transparent;letter-spacing:.3px}
 .main-tab:hover{color:#aaa}.main-tab.active{color:#fff;border-bottom-color:#1D9E75}
@@ -463,7 +488,9 @@ pre{font-size:10px;font-family:monospace;background:#111;border:1px solid #1e1e1
   <span class="logo">API <span>Recorder</span></span>
   <span style="font-size:11px;color:#444">|</span>
   <span style="font-size:11px;color:#666">${generated}</span>
-  <span style="font-size:11px;color:#555;margin-left:auto">${httpEntries.length} HTTP · ${wsEntries.length} WS · ${consoleEntries.length} logs · ${noteEntries.length} notes · ${duration}s</span>
+  <span style="font-size:11px;color:#555;margin-left:auto;margin-right:6px">${httpEntries.length} HTTP · ${wsEntries.length} WS · ${consoleEntries.length} logs · ${noteEntries.length} notes · ${duration}s</span>
+  <button class="dlbtn" onclick="downloadConsoleLogs()" title="Download console logs only as JSON">↓ Console logs</button>
+  <button class="dlbtn" onclick="downloadNetworkJSON()" title="Download network requests/responses only as JSON">↓ Network JSON</button>
 </div>
 
 <div class="stats">
@@ -502,7 +529,7 @@ pre{font-size:10px;font-family:monospace;background:#111;border:1px solid #1e1e1
     <div class="pane-hdr">Screen recording</div>
     <div class="video-wrap">
       ${videoSrc
-        ? `<video id="vid" controls src="${videoSrc}"></video>`
+        ? `<video id="vid" controls preload="auto"></video>`
         : `<div class="no-video">No screen recording in this session.<br><small>Start recording before testing to capture video.</small></div>`
       }
     </div>
@@ -554,6 +581,28 @@ pre{font-size:10px;font-family:monospace;background:#111;border:1px solid #1e1e1
 <script>
 const ALL_ENTRIES = ${sessionData};
 const START_TS    = ${startTime ? startTime : "null"};
+const VIDEO_SRC   = ${videoSrc ? JSON.stringify(videoSrc) : "null"};
+
+/* A base64 data: URI is not reliably seekable (no range requests), so convert
+   it to a Blob URL once on load — that makes currentTime jumps consistent. */
+(function initVideo(){
+  if(!VIDEO_SRC) return;
+  const vid=document.getElementById("vid"); if(!vid) return;
+  // MediaRecorder output (WebM and fragmented MP4) often reports duration as
+  // Infinity, which breaks the scrubber and seeking. Force the browser to
+  // compute the real duration by seeking to the end once, then reset.
+  vid.addEventListener("loadedmetadata", function fixDuration(){
+    if(vid.duration===Infinity || !isFinite(vid.duration)){
+      vid.currentTime=1e101;
+      vid.addEventListener("timeupdate", function once(){
+        vid.removeEventListener("timeupdate", once);
+        vid.currentTime=0;
+      });
+    }
+  });
+  fetch(VIDEO_SRC).then(r=>r.blob()).then(b=>{ vid.src=URL.createObjectURL(b); })
+    .catch(()=>{ vid.src=VIDEO_SRC; }); // fallback: data URI (still plays, seek may lag)
+})();
 
 const HTTP_ENTRIES = ALL_ENTRIES.filter(e => e.kind === "http");
 const T_MIN = HTTP_ENTRIES.length ? Math.min(...HTTP_ENTRIES.map(e=>e.ts - e.ms)) : 0;
@@ -629,7 +678,7 @@ function openDetail(id) {
   const e=ALL_ENTRIES.find(x=>x.id===id); if(!e)return;
   const titleEl=document.getElementById("detailTitle");
   const body=document.getElementById("detailBody");
-  if(START_TS&&e.ts){const vid=document.getElementById("vid");if(vid)vid.currentTime=Math.max(0,(e.ts-START_TS)/1000-0.5);}
+  if(START_TS&&e.ts){const vid=document.getElementById("vid");if(vid){let t=(e.ts-START_TS)/1000-0.5;if(!isFinite(t))t=0;t=Math.max(0,t);if(isFinite(vid.duration)&&vid.duration>0)t=Math.min(t,vid.duration);vid.currentTime=t;}}
   if(e.kind==="note"){titleEl.textContent="Note";body.innerHTML="<div class='fb'><div class='fl'>annotation</div><div style='font-size:14px;color:#fff;line-height:1.5'>"+esc(e.text)+"</div></div><div class='fb'><div class='fl'>timestamp</div><div style='font-size:11px;color:#555;font-family:monospace'>"+new Date(e.ts).toISOString()+"</div></div>";return;}
   if(e.kind==="console"){const cs=CON_STYLE[e.level]||CON_STYLE.log;titleEl.textContent=cs.label+" · "+(e.level||"log").toUpperCase();body.innerHTML="<div class='fb'><div class='fl'>message</div><pre style='color:"+cs.fg+"'>"+esc(e.text||"")+"</pre></div>"+(e.url?"<div class='fb'><div class='fl'>source</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace'>"+esc(e.url)+(e.lineNumber?":"+e.lineNumber:"")+"</div></div>":"")+"<div class='fb'><div class='fl'>timestamp</div><div style='font-size:11px;color:#555;font-family:monospace'>"+new Date(e.ts).toISOString()+"</div></div>";return;}
   if(e.kind==="ws"){const s=WS_STYLE[e.event]||WS_STYLE.received;titleEl.textContent=s.label+" "+e.event.toUpperCase()+(e.idx!==undefined?" #"+e.idx:"");body.innerHTML="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all'>"+esc(e.url)+"</div></div><div style='display:flex;gap:6px;margin-bottom:12px;align-items:center'><span class='badge' style='background:"+s.bg+";color:"+s.fg+"'>"+s.label+"</span><span class='badge' style='background:#1a1a1a;color:#555'>"+e.event.toUpperCase()+"</span>"+(e.idx!==undefined?"<span style='font-size:10px;color:#444'>msg #"+e.idx+"</span>":"")+"<span style='font-size:10px;color:#444'>"+new Date(e.ts).toISOString()+"</span></div><div class='fb'><div class='fl'>payload</div><pre>"+esc(fmt(e.payload))+"</pre></div>"+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");return;}
@@ -706,7 +755,7 @@ function openNetDetail(id) {
   netSelectedId = id;
   renderNetwork();
   const e = ALL_ENTRIES.find(x => x.id===id); if(!e)return;
-  if(START_TS&&e.ts){const vid=document.getElementById("vid");if(vid)vid.currentTime=Math.max(0,(e.ts-START_TS)/1000-0.5);}
+  if(START_TS&&e.ts){const vid=document.getElementById("vid");if(vid){let t=(e.ts-START_TS)/1000-0.5;if(!isFinite(t))t=0;t=Math.max(0,t);if(isFinite(vid.duration)&&vid.duration>0)t=Math.min(t,vid.duration);vid.currentTime=t;}}
   const tabs   = ["response","request","headers","timing"];
   const detail = document.getElementById("netDetail");
   detail.style.display="flex";
@@ -758,6 +807,33 @@ function renderNetDetailBody(e) {
         "<span style='color:#555'>Start offset</span><span style='color:#888'>"+(t0-T_MIN)+"ms from session start</span>"+
       "</div>";
   }
+}
+
+/* ── Per-section downloads ───────────────────────────────────── */
+function _dlJSON(name, obj){
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(obj,null,2)],{type:"application/json"}));
+  a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+}
+function _maybeParse(v){ if(v==null)return null; if(typeof v!=="string")return v; try{return JSON.parse(v);}catch(_){return v;} }
+function downloadConsoleLogs(){
+  const logs=ALL_ENTRIES.filter(e=>e.kind==="console").map(e=>({
+    level:e.level, text:e.text, source:e.source||null, url:e.url||null,
+    lineNumber:e.lineNumber||null, ts:e.ts, time:new Date(e.ts).toISOString()
+  }));
+  if(!logs.length){alert("No console logs in this session.");return;}
+  _dlJSON("console-logs-"+Date.now()+".json", logs);
+}
+function downloadNetworkJSON(){
+  const net=ALL_ENTRIES.filter(e=>e.kind==="http").map(e=>({
+    method:e.method, url:e.url, status:e.status, durationMs:e.ms,
+    ts:e.ts, time:new Date(e.ts).toISOString(),
+    requestBody:_maybeParse(e.reqBody), responseBody:_maybeParse(e.resBody),
+    note:e.note||undefined
+  }));
+  if(!net.length){alert("No network requests in this session.");return;}
+  _dlJSON("network-"+Date.now()+".json", net);
 }
 
 renderTimeline();

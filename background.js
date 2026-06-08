@@ -28,6 +28,8 @@ loadState();
 /* ── In-memory request tracking (keyed by requestId) ────────── */
 const pending = {};   // requestId -> { method, url, t0, reqBody, status }
 const wsSocks = {};   // requestId -> { url, t0, msgIndex }
+let recordingStartMs = 0;  // wall-clock when this recording session began
+let reattachAttempts = 0;  // capped re-attach retries for the current session
 
 /* ── Asset filter — only skip true static assets, NOT .json ─── */
 const SKIP_ASSET = /\.(js|css|svg|png|jpg|jpeg|gif|webp|woff2?|ttf|eot|ico|map)(\?|$)/i;
@@ -36,6 +38,30 @@ const SKIP_ASSET = /\.(js|css|svg|png|jpg|jpeg|gif|webp|woff2?|ttf|eot|ico|map)(
 function forward(data) {
   if (_state.recorderTabId) {
     chrome.tabs.sendMessage(_state.recorderTabId, { type: "API_EVENT", data }).catch(() => {});
+  }
+}
+
+/* ── Attach debugger + enable the CDP domains we listen on ───── */
+async function attachAndEnable(tabId) {
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+  } catch (e) {
+    // "Another debugger is already attached" means we're still attached — fine,
+    // just (re-)enable the domains below. Any other error is fatal for capture.
+    if (!/already attached/i.test(e.message || "")) {
+      console.error("[BG] attach failed:", e.message);
+      return { ok: false, error: e.message };
+    }
+  }
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", { maxPostDataSize: 65536 });
+    await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {});
+    await chrome.debugger.sendCommand({ tabId }, "Log.enable", {});
+    console.log("[BG] debugger attached, Network+Runtime+Log enabled on tab", tabId);
+    return { ok: true };
+  } catch (e) {
+    console.error("[BG] enable domains failed:", e.message);
+    return { ok: false, error: e.message };
   }
 }
 
@@ -155,6 +181,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   /* Console logs via Runtime.consoleAPICalled */
   if (method === "Runtime.consoleAPICalled") {
     const { type, args, timestamp } = params;
+    // Enabling Runtime makes Chrome replay messages logged BEFORE recording
+    // began (their CDP timestamp predates recordingStartMs). Drop them so the
+    // timeline only holds logs that map onto the screen recording.
+    if (recordingStartMs && timestamp && timestamp < recordingStartMs - 1000) return;
     const text = args.map(a => {
       if (a.type === "string") return a.value;
       if (a.type === "object" && a.preview) {
@@ -162,7 +192,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       }
       return a.value !== undefined ? String(a.value) : a.description || a.type;
     }).join(" ");
-    forward({ kind:"console", level:type, text, ts: Math.round(timestamp * 1000) || Date.now() });
+    // CDP Runtime timestamp is already in ms since epoch — do NOT scale it.
+    forward({ kind:"console", level:type, text, ts: Math.round(timestamp) || Date.now() });
     return;
   }
 
@@ -170,14 +201,40 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (method === "Log.entryAdded") {
     const { entry } = params;
     if (!entry) return;
+    // Same buffered-replay guard as consoleAPICalled.
+    if (recordingStartMs && entry.timestamp && entry.timestamp < recordingStartMs - 1000) return;
     forward({ kind:"console", level:entry.level, text:entry.text, source:entry.source,
-              url:entry.url, lineNumber:entry.lineNumber, ts:Date.now() });
+              url:entry.url, lineNumber:entry.lineNumber, ts: Math.round(entry.timestamp) || Date.now() });
     return;
   }
 });
 
-chrome.debugger.onDetach.addListener((source) => {
-  console.log("[BG] debugger detached from tab", source.tabId);
+chrome.debugger.onDetach.addListener((source, reason) => {
+  console.log("[BG] debugger detached from tab", source.tabId, "reason:", reason);
+  if (!_state.isRecording || source.tabId !== _state.targetTabId) return;
+
+  // The debugger drops mid-recording for several reasons: a cross-process
+  // navigation/renderer swap, or "canceled_by_user" (the debugging banner gets
+  // dismissed — sometimes spuriously alongside the tab-capture bar). Since the
+  // user explicitly started recording, try to recover by re-attaching. Cap the
+  // retries so we never fight a user who genuinely wants debugging off, and so a
+  // reload loop can't spin forever. (Real tab closure clears isRecording via
+  // tabs.onRemoved, so the guard above stops us there.)
+  // DevTools owning the tab can't be recovered from — surface that instead.
+  if (reason === "replaced_with_devtools") {
+    if (_state.recorderTabId) chrome.tabs.sendMessage(_state.recorderTabId, { type:"ATTACH_ERROR",
+      error:"DevTools is open on the target tab. Chrome allows only one debugger per tab — close DevTools, then Stop and Start again." }).catch(() => {});
+    return;
+  }
+  if (reattachAttempts >= 5) {
+    if (_state.recorderTabId) chrome.tabs.sendMessage(_state.recorderTabId, { type:"ATTACH_ERROR",
+      error:"Capture keeps getting cancelled. Do NOT click “Cancel” on the “…is debugging this browser” bar — it must stay visible while recording." }).catch(() => {});
+    return;
+  }
+  reattachAttempts++;
+  setTimeout(() => {
+    if (_state.isRecording && source.tabId === _state.targetTabId) attachAndEnable(source.tabId);
+  }, 500);
 });
 
 /* ── Message handler ─────────────────────────────────────────── */
@@ -211,19 +268,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "RECORDING_STARTED") {
     const targetTabId = _state.targetTabId;
+    recordingStartMs = Date.now();
+    reattachAttempts = 0;
     saveState({ isRecording: true }).then(async () => {
       if (!targetTabId) return;
-      // Attach debugger
-      try {
-        await chrome.debugger.attach({ tabId: targetTabId }, "1.3");
-        await chrome.debugger.sendCommand({ tabId: targetTabId }, "Network.enable", {
-          maxPostDataSize: 65536
-        });
-        await chrome.debugger.sendCommand({ tabId: targetTabId }, "Runtime.enable", {});
-        await chrome.debugger.sendCommand({ tabId: targetTabId }, "Log.enable", {});
-        console.log("[BG] debugger attached, Network+Runtime+Log enabled on tab", targetTabId);
-      } catch (e) {
-        console.error("[BG] attach failed:", e.message);
+      const res = await attachAndEnable(targetTabId);
+      if (!res.ok && _state.recorderTabId) {
+        chrome.tabs.sendMessage(_state.recorderTabId, { type:"ATTACH_ERROR", error: res.error }).catch(() => {});
       }
       chrome.tabs.sendMessage(targetTabId, { type:"RECORDING_STARTED" }).catch(() => {});
     });
