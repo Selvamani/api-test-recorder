@@ -147,8 +147,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
   if (method === "Network.webSocketFrameSent") {
     const { requestId, response } = params;
-    const ws = wsSocks[requestId];
-    if (!ws) return;
+    // Lazily register sockets we didn't see created (e.g. opened before
+    // recording, or after a debugger re-attach) so we never drop their frames.
+    const ws = wsSocks[requestId] || (wsSocks[requestId] = { url: "(socket opened before capture)", t0: Date.now(), msgIndex: 0 });
     ws.msgIndex++;
     let payload = response.payloadData;
     try { payload = JSON.parse(response.payloadData); } catch (_) {}
@@ -159,8 +160,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
   if (method === "Network.webSocketFrameReceived") {
     const { requestId, response } = params;
-    const ws = wsSocks[requestId];
-    if (!ws) return;
+    const ws = wsSocks[requestId] || (wsSocks[requestId] = { url: "(socket opened before capture)", t0: Date.now(), msgIndex: 0 });
     ws.msgIndex++;
     let payload = response.payloadData;
     try { payload = JSON.parse(response.payloadData); } catch (_) {}

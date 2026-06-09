@@ -542,6 +542,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .scroll{flex:1;overflow-y:auto}.scroll::-webkit-scrollbar{width:3px}.scroll::-webkit-scrollbar-thumb{background:#2a2a2a}
 .entry{padding:6px 12px;border-left:2px solid transparent;cursor:pointer;border-bottom:1px solid #141414}
 .entry:hover{background:#141414}.entry.sel{background:#141414;border-left-color:#1D9E75}
+.entry.playing{background:#0e1f18;border-left-color:#1D9E75;box-shadow:inset 0 0 0 1px rgba(29,158,117,.18)}
 .entry.err{border-left-color:#E24B4A!important}.entry.note-e{border-left-color:#7F77DD}.entry.ws-e{border-left-color:#378ADD}.entry.con-e{border-left-color:#444}
 .erow{display:flex;align-items:center;gap:4px}
 .badge{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;flex-shrink:0;letter-spacing:.3px;font-family:monospace}
@@ -705,9 +706,11 @@ const METHOD_FG    = m => (METHOD_COLORS[m]||["","#888"])[1];
 function esc(s){return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/'/g,"&#39;");}
 function fmt(v){if(v==null)return"(empty)";try{return JSON.stringify(typeof v==="string"?JSON.parse(v):v,null,2);}catch(_){return String(v);}}
 function fmtTime(ts){const d=new Date(ts);return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0");}
+function fmtVts(ts){if(!START_TS||ts<START_TS)return"";var ms=ts-START_TS,s=Math.floor(ms/1000),m=Math.floor(s/60);return String(m).padStart(2,"0")+":"+String(s%60).padStart(2,"0");}
 
 function b64ToText(str){var s=String(str).trim().replace(/\\s+/g,"");if(!s||!/^[A-Za-z0-9+/]+={0,2}$/.test(s))throw new Error("not base64");var bin=atob(s);var bytes=Uint8Array.from(bin,function(c){return c.charCodeAt(0);});return new TextDecoder().decode(bytes);}
-function wireWsB64(payload){var btn=document.getElementById("wsB64Btn"),pre=document.getElementById("wsPayload");if(!btn||!pre)return;var rawStr=typeof payload==="string"?payload:JSON.stringify(payload),decoded=false;btn.addEventListener("click",function(){decoded=!decoded;if(decoded){try{pre.textContent=fmt(b64ToText(rawStr));}catch(_){pre.textContent="(payload is not valid base64)";}btn.textContent="Show raw";}else{pre.textContent=fmt(payload);btn.textContent="Decode base64";}});}
+// Wires every WS "Decode base64" button in the detail panel (works for clustered detail too).
+function wireAllWsB64(){document.querySelectorAll(".wsb64").forEach(function(btn){if(btn._w)return;btn._w=true;btn.addEventListener("click",function(){var id=btn.getAttribute("data-tgt"),pre=document.getElementById("wsp-"+id),en=ALL_ENTRIES.find(function(x){return x.id===id;});if(!pre||!en)return;var raw=typeof en.payload==="string"?en.payload:JSON.stringify(en.payload);if(btn.textContent==="Decode base64"){try{pre.textContent=fmt(b64ToText(raw));}catch(_){pre.textContent="(payload is not valid base64)";}btn.textContent="Show raw";}else{pre.textContent=fmt(en.payload);btn.textContent="Decode base64";}});});}
 
 /* ── Main tabs ───────────────────────────────────────────────── */
 document.querySelectorAll(".main-tab").forEach(t => {
@@ -744,18 +747,18 @@ function renderTimeline() {
   if (!vis.length){tl.innerHTML="<div class='empty'>No entries match this filter</div>";return;}
   tl.innerHTML=vis.map(e=>{
     const sel=e.id===selectedId?" sel":"";
-    if(e.kind==="note")return"<div class='entry note-e"+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:#1C1530;color:#AFA9EC'>NOTE</span><span style='color:#b0a8e8;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px'>"+esc(e.text)+"</span><span class='ets'>"+fmtTime(e.ts)+"</span></div></div>";
-    if(e.kind==="ws"){const s=WS_STYLE[e.event]||WS_STYLE.received;let su="";try{const u=new URL(e.url);su=u.host+u.pathname;}catch(_){su=e.url||"";}su=su.length>35?"…"+su.slice(-32):su;let pv="";if(e.payload!=null){const p=typeof e.payload==="string"?e.payload:JSON.stringify(e.payload);pv=p.length>50?p.slice(0,47)+"…":p;}return"<div class='entry ws-e"+(e.event==="error"?" err":"")+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:"+s.bg+";color:"+s.fg+"'>"+s.label+"</span><span class='badge' style='background:#1a1a1a;color:#555;font-size:9px'>"+e.event.toUpperCase()+"</span><span class='ets'>"+fmtTime(e.ts)+"</span></div><div class='eurl'>"+esc(su)+"</div>"+(pv?"<div style='font-size:9px;color:#333;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+esc(pv)+"</div>":"")+"</div>";}
-    if(e.kind==="console"){const cs=CON_STYLE[e.level]||CON_STYLE.log;const pv=(e.text||"").length>65?e.text.slice(0,62)+"…":(e.text||"");return"<div class='entry con-e"+(e.level==="error"?" err":"")+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:"+cs.bg+";color:"+cs.fg+";font-family:monospace'>"+cs.label+"</span><span style='font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px'>"+esc(pv)+"</span><span class='ets'>"+fmtTime(e.ts)+"</span></div></div>";}
+    if(e.kind==="note")return"<div class='entry note-e"+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:#1C1530;color:#AFA9EC'>NOTE</span><span style='color:#b0a8e8;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px'>"+esc(e.text)+"</span><span class='ets'>"+fmtTime(e.ts)+(fmtVts(e.ts)?" <span style='color:#888;font-size:9px;margin-left:4px'>⏱ "+fmtVts(e.ts)+"</span>":"")+"</span></div></div>";
+    if(e.kind==="ws"){const s=WS_STYLE[e.event]||WS_STYLE.received;let su="";try{const u=new URL(e.url);su=u.host+u.pathname;}catch(_){su=e.url||"";}su=su.length>35?"…"+su.slice(-32):su;let pv="";if(e.payload!=null){const p=typeof e.payload==="string"?e.payload:JSON.stringify(e.payload);pv=p.length>50?p.slice(0,47)+"…":p;}return"<div class='entry ws-e"+(e.event==="error"?" err":"")+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:"+s.bg+";color:"+s.fg+"'>"+s.label+"</span><span class='badge' style='background:#1a1a1a;color:#555;font-size:9px'>"+e.event.toUpperCase()+"</span><span class='ets'>"+fmtTime(e.ts)+(fmtVts(e.ts)?" <span style='color:#888;font-size:9px;margin-left:4px'>⏱ "+fmtVts(e.ts)+"</span>":"")+"</span></div><div class='eurl'>"+esc(su)+"</div>"+(pv?"<div style='font-size:9px;color:#333;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+esc(pv)+"</div>":"")+"</div>";}
+    if(e.kind==="console"){const cs=CON_STYLE[e.level]||CON_STYLE.log;const pv=(e.text||"").length>65?e.text.slice(0,62)+"…":(e.text||"");return"<div class='entry con-e"+(e.level==="error"?" err":"")+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:"+cs.bg+";color:"+cs.fg+";font-family:monospace'>"+cs.label+"</span><span style='font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px'>"+esc(pv)+"</span><span class='ets'>"+fmtTime(e.ts)+(fmtVts(e.ts)?" <span style='color:#888;font-size:9px;margin-left:4px'>⏱ "+fmtVts(e.ts)+"</span>":"")+"</span></div></div>";}
     const isErr=e.status>=400;const[bg,fg]=METHOD_COLORS[e.method]||["#1a1a1a","#888"];let su="";try{const u=new URL(e.url);su=u.pathname+(u.search||"");}catch(_){su=e.url;}su=su.length>35?"…"+su.slice(-32):su;
-    return"<div class='entry"+(isErr?" err":"")+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:"+bg+";color:"+fg+"'>"+e.method+"</span><span class='badge' style='background:"+(isErr?"#2A0A0A":"#0A1F14")+";color:"+(isErr?"#F09595":"#5DCAA5")+"'>"+e.status+"</span><span style='font-size:9px;color:#444'>"+e.ms+"ms</span><span class='ets'>"+fmtTime(e.ts)+"</span></div><div class='eurl'>"+esc(su)+"</div></div>";
+    return"<div class='entry"+(isErr?" err":"")+sel+"' data-id='"+e.id+"'><div class='erow'><span class='badge' style='background:"+bg+";color:"+fg+"'>"+e.method+"</span><span class='badge' style='background:"+(isErr?"#2A0A0A":"#0A1F14")+";color:"+(isErr?"#F09595":"#5DCAA5")+"'>"+e.status+"</span><span style='font-size:9px;color:#444'>"+e.ms+"ms</span><span class='ets'>"+fmtTime(e.ts)+(fmtVts(e.ts)?" <span style='color:#888;font-size:9px;margin-left:4px'>⏱ "+fmtVts(e.ts)+"</span>":"")+"</span></div><div class='eurl'>"+esc(su)+"</div></div>";
   }).join("");
   // One delegated listener (set once) instead of one per entry — keeps clicks
   // instant even with thousands of WS frames.
   tl.onclick=function(ev){var el=ev.target.closest(".entry");if(el&&el.dataset.id)openDetail(el.dataset.id);};
 }
 
-function openDetail(id) {
+function openDetail(id, seek) {
   // Move highlight via class toggle — NOT a full renderTimeline() rebuild
   // (which re-rendered every entry on each click and made WS-heavy reports lag).
   var _tl=document.getElementById("timeline");
@@ -763,15 +766,37 @@ function openDetail(id) {
   selectedId=id;
   var _cur=_tl.querySelector(".entry[data-id='"+id+"']"); if(_cur)_cur.classList.add("sel");
   const e=ALL_ENTRIES.find(x=>x.id===id); if(!e)return;
-  const titleEl=document.getElementById("detailTitle");
-  const body=document.getElementById("detailBody");
-  if(START_TS&&e.ts){const vid=document.getElementById("vid");if(vid){let t=(e.ts-START_TS)/1000-0.5;if(!isFinite(t))t=0;t=Math.max(0,t);if(isFinite(vid.duration)&&vid.duration>0)t=Math.min(t,vid.duration);vid.currentTime=t;}}
-  if(e.kind==="note"){titleEl.textContent="Note";body.innerHTML="<div class='fb'><div class='fl'>annotation</div><div style='font-size:14px;color:#fff;line-height:1.5'>"+esc(e.text)+"</div></div><div class='fb'><div class='fl'>timestamp</div><div style='font-size:11px;color:#555;font-family:monospace'>"+new Date(e.ts).toISOString()+"</div></div>";return;}
-  if(e.kind==="console"){const cs=CON_STYLE[e.level]||CON_STYLE.log;titleEl.textContent=cs.label+" · "+(e.level||"log").toUpperCase();body.innerHTML="<div class='fb'><div class='fl'>message</div><pre style='color:"+cs.fg+"'>"+esc(e.text||"")+"</pre></div>"+(e.url?"<div class='fb'><div class='fl'>source</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace'>"+esc(e.url)+(e.lineNumber?":"+e.lineNumber:"")+"</div></div>":"")+"<div class='fb'><div class='fl'>timestamp</div><div style='font-size:11px;color:#555;font-family:monospace'>"+new Date(e.ts).toISOString()+"</div></div>";return;}
-  if(e.kind==="ws"){const s=WS_STYLE[e.event]||WS_STYLE.received;titleEl.textContent=s.label+" "+e.event.toUpperCase()+(e.idx!==undefined?" #"+e.idx:"");body.innerHTML="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all'>"+esc(e.url)+"</div></div><div style='display:flex;gap:6px;margin-bottom:12px;align-items:center'><span class='badge' style='background:"+s.bg+";color:"+s.fg+"'>"+s.label+"</span><span class='badge' style='background:#1a1a1a;color:#555'>"+e.event.toUpperCase()+"</span>"+(e.idx!==undefined?"<span style='font-size:10px;color:#444'>msg #"+e.idx+"</span>":"")+"<span style='font-size:10px;color:#444'>"+new Date(e.ts).toISOString()+"</span></div><div class='fb'><div class='fl' style='display:flex;align-items:center;gap:8px'>payload<button id='wsB64Btn' style='font-size:9px;font-weight:600;color:#9bdcc4;background:#0A1F14;border:1px solid #1D5C42;border-radius:3px;padding:1px 6px;cursor:pointer'>Decode base64</button></div><pre id='wsPayload'>"+esc(fmt(e.payload))+"</pre></div>"+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");wireWsB64(e.payload);return;}
-  const[bg,fg]=METHOD_COLORS[e.method]||["#1a1a1a","#888"];
-  titleEl.textContent=e.method+" "+e.status+" · "+e.ms+"ms";
-  body.innerHTML="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all;line-height:1.5'>"+esc(e.url)+"</div></div>"+"<div style='display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;align-items:center'><span class='badge' style='background:"+bg+";color:"+fg+"'>"+e.method+"</span><span class='badge' style='background:"+(e.status>=400?"#2A0A0A":"#0A1F14")+";color:"+(e.status>=400?"#F09595":"#5DCAA5")+"'>"+e.status+"</span><span style='font-size:10px;color:#444'>"+new Date(e.ts).toISOString()+"</span></div>"+(e.reqBody!=null?"<div class='fb'><div class='fl'>request body</div><pre>"+esc(fmt(e.reqBody))+"</pre></div>":"")+"<div class='fb'><div class='fl'>response body</div><pre>"+esc(fmt(e.resBody))+"</pre></div>"+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");
+  if(seek!==false&&START_TS&&e.ts){const vid=document.getElementById("vid");if(vid){let t=(e.ts-START_TS)/1000;if(!isFinite(t))t=0;t=Math.max(0,t);if(isFinite(vid.duration)&&vid.duration>0)t=Math.min(t,vid.duration);vid.currentTime=t;}}
+  renderDetail(e);
+}
+
+// Returns {title, bodyHtml} for one entry — shared by single + clustered detail.
+function getEntryDetailHTML(e){
+  var vt=fmtVts(e.ts);
+  var tsLine="<div class='fb'><div class='fl'>timestamp</div><div style='font-size:11px;color:#555;font-family:monospace'>"+new Date(e.ts).toISOString()+(vt?" <span style='color:#1D9E75;margin-left:6px'>⏱ "+vt+"</span>":"")+"</div></div>";
+  var title,bodyHtml;
+  if(e.kind==="note"){title="Note";bodyHtml="<div class='fb'><div class='fl'>annotation</div><div style='font-size:14px;color:#fff;line-height:1.5'>"+esc(e.text)+"</div></div>"+tsLine;}
+  else if(e.kind==="console"){var cs=CON_STYLE[e.level]||CON_STYLE.log;title=cs.label+" · "+(e.level||"log").toUpperCase();bodyHtml="<div class='fb'><div class='fl'>message</div><pre style='color:"+cs.fg+"'>"+esc(e.text||"")+"</pre></div>"+(e.url?"<div class='fb'><div class='fl'>source</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace'>"+esc(e.url)+(e.lineNumber?":"+e.lineNumber:"")+"</div></div>":"")+tsLine;}
+  else if(e.kind==="ws"){var s=WS_STYLE[e.event]||WS_STYLE.received;title=s.label+" "+e.event.toUpperCase()+(e.idx!==undefined?" #"+e.idx:"");bodyHtml="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all'>"+esc(e.url)+"</div></div><div style='display:flex;gap:6px;margin-bottom:12px;align-items:center'><span class='badge' style='background:"+s.bg+";color:"+s.fg+"'>"+s.label+"</span><span class='badge' style='background:#1a1a1a;color:#555'>"+e.event.toUpperCase()+"</span>"+(e.idx!==undefined?"<span style='font-size:10px;color:#444'>msg #"+e.idx+"</span>":"")+"</div><div class='fb'><div class='fl' style='display:flex;align-items:center;gap:8px'>payload<button class='wsb64' data-tgt='"+e.id+"' style='font-size:9px;font-weight:600;color:#9bdcc4;background:#0A1F14;border:1px solid #1D5C42;border-radius:3px;padding:1px 6px;cursor:pointer'>Decode base64</button></div><pre id='wsp-"+e.id+"'>"+esc(fmt(e.payload))+"</pre></div>"+tsLine+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");}
+  else{var mc=METHOD_COLORS[e.method]||["#1a1a1a","#888"];title=e.method+" "+e.status+" · "+e.ms+"ms";bodyHtml="<div class='fb'><div class='fl'>url</div><div style='font-size:11px;color:#7EB8D4;font-family:monospace;word-break:break-all;line-height:1.5'>"+esc(e.url)+"</div></div><div style='display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;align-items:center'><span class='badge' style='background:"+mc[0]+";color:"+mc[1]+"'>"+e.method+"</span><span class='badge' style='background:"+(e.status>=400?"#2A0A0A":"#0A1F14")+";color:"+(e.status>=400?"#F09595":"#5DCAA5")+"'>"+e.status+"</span><span style='font-size:9px;color:#444'>"+e.ms+"ms</span></div>"+(e.reqBody!=null?"<div class='fb'><div class='fl'>request body</div><pre>"+esc(fmt(e.reqBody))+"</pre></div>":"")+"<div class='fb'><div class='fl'>response body</div><pre>"+esc(fmt(e.resBody))+"</pre></div>"+tsLine+(e.note?"<div class='fb'><div class='fl'>note</div><div style='font-size:12px;color:#aaa'>"+esc(e.note)+"</div></div>":"");}
+  return {title:title,bodyHtml:bodyHtml};
+}
+
+function renderDetail(e){
+  var r=getEntryDetailHTML(e);
+  document.getElementById("detailTitle").textContent=r.title;
+  document.getElementById("detailBody").innerHTML=r.bodyHtml;
+  wireAllWsB64();
+}
+
+// Detail panel for several entries sharing the current playback moment.
+function renderDetailCluster(list){
+  if(list.length===1){renderDetail(list[0]);return;}
+  var html="";
+  list.forEach(function(e,i){var r=getEntryDetailHTML(e);if(i>0)html+="<hr style='border:none;border-top:1px solid #1e1e1e;margin:18px 0'>";html+="<div style='font-size:12px;font-weight:600;color:#1D9E75;margin-bottom:10px'>"+r.title+"</div>"+r.bodyHtml;});
+  document.getElementById("detailTitle").textContent=list.length+" events at this moment";
+  document.getElementById("detailBody").innerHTML=html;
+  wireAllWsB64();
 }
 
 /* ── Network tab ─────────────────────────────────────────────── */
@@ -934,6 +959,49 @@ function downloadWebSocket(){
 }
 
 renderTimeline();
+
+/* ── Session replay: sync timeline + detail to video playback ──── */
+(function(){
+  var vid=document.getElementById("vid");
+  if(!vid||!START_TS)return;
+  var lastBestId=null, lastCluster=[], rafPending=false, cachedFilter=null, cachedVis=null;
+  function visFor(){
+    if(cachedFilter===currentFilter&&cachedVis)return cachedVis;
+    cachedFilter=currentFilter;
+    cachedVis=ALL_ENTRIES.filter(function(e){
+      if(currentFilter==="http")    return e.kind==="http";
+      if(currentFilter==="err")     return (e.kind==="http"&&e.status>=400)||(e.kind==="ws"&&e.event==="error")||(e.kind==="console"&&e.level==="error");
+      if(currentFilter==="ws")      return e.kind==="ws";
+      if(currentFilter==="console") return e.kind==="console";
+      if(currentFilter==="note")    return e.kind==="note";
+      return true;
+    });
+    return cachedVis;
+  }
+  function sync(){
+    var currentTs=START_TS+vid.currentTime*1000;
+    var vis=visFor(); if(!vis.length)return;
+    // binary search for the last entry at/before the current playback time
+    var lo=0,hi=vis.length-1,bi=-1;
+    while(lo<=hi){var m=(lo+hi)>>1;if(vis[m].ts<=currentTs){bi=m;lo=m+1;}else hi=m-1;}
+    var best=bi>=0?vis[bi]:vis[0];
+    if(!best||best.id===lastBestId)return;
+    lastBestId=best.id;
+    // cluster: entries within 500ms before best (catches same-moment bursts)
+    var cluster=[]; for(var i=bi;i>=0;i--){if(best.ts-vis[i].ts>500)break;cluster.unshift(vis[i]);}
+    if(!cluster.length)cluster=[best];
+    var tl=document.getElementById("timeline");
+    lastCluster.forEach(function(cid){var el=tl.querySelector(".entry[data-id='"+cid+"']");if(el)el.classList.remove("playing");});
+    lastCluster=cluster.map(function(c){return c.id;});
+    lastCluster.forEach(function(cid){var el=tl.querySelector(".entry[data-id='"+cid+"']");if(el)el.classList.add("playing");});
+    var tgt=tl.querySelector(".entry[data-id='"+best.id+"']");
+    if(tgt)tgt.scrollIntoView({block:"nearest"});
+    renderDetailCluster(cluster);
+  }
+  // timeupdate fires ~4-15fps during playback; coalesce to one update per frame
+  vid.addEventListener("timeupdate",function(){if(rafPending)return;rafPending=true;requestAnimationFrame(function(){rafPending=false;sync();});});
+  vid.addEventListener("seeked",function(){lastBestId=null;sync();});
+})();
 </script>
 </body>
 </html>`;
