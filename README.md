@@ -25,7 +25,7 @@ A Chrome extension that **screen-records your browser tab** and captures every A
 
 1. Clone this repo:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/api-test-recorder.git
+   git clone https://github.com/Selvamani/api-test-recorder.git
    cd api-test-recorder
    ```
 
